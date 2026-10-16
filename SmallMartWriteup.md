@@ -104,30 +104,3 @@ curl -b cj.txt http://TARGET/admin
  
 Every defensive check the developers added uses a *stricter* or *differently-folding* comparison than the one actual authorization check, so the "look like admin" string slips past all of them and only matches where it matters.
  
-## Why This Pattern Matters Beyond This CTF
- 
-This is a general class of bug: **any time an application uses more than one string-comparison/normalization strategy to represent the same security decision, an attacker can hunt for an input where the strategies disagree.** Common variants seen in the wild and in other CTFs:
- 
-- Turkish-I / dotted-I locale bugs (this one)
-- NFKC/NFKD normalization collisions (fullwidth Unicode homoglyphs normalizing into ASCII lookalikes)
-- Case folding differences between a WAF/filter layer and the application layer
-- `strcasecmp`-style comparisons in one language vs. Unicode-aware comparisons in another, when polyglot services share a username/session namespace
-## Remediation
- 
-1. **Use one canonical comparison function everywhere a security decision depends on a username.** Pick simple ASCII case-folding (`name.strip().lower()` restricted to `[a-zA-Z0-9_]`) or enforce an allow-listed character set on registration (e.g., `^[a-z0-9_]{3,20}$`, rejecting non-ASCII entirely) so the two folding algorithms can never diverge.
-2. **Normalize Unicode input (NFKC) and then restrict to an ASCII-only charset before any comparison or storage**, not after.
-3. **Compare against a canonicalized, case-folded constant** (`name.casefold() == "admin"`, same function, same mode, everywhere) rather than mixing `.lower()`, literal `==`, and `re.IGNORECASE` across different code paths.
-4. Treat username uniqueness checks and authorization checks as the **same security boundary** — if one can be bypassed by a confusable string, so can the other; they should share a single normalization routine.
-## Secondary Finding (Informational, Lower Confidence)
- 
-```python
-app.secret_key = os.environ.get("SECRET_KEY", "fake_key_for_testing")
-```
- 
-If the deployed instance does not set the `SECRET_KEY` environment variable, the Flask session-signing key is the hardcoded fallback, and a session cookie can be forged directly:
- 
-```bash
-flask-unsign --sign --cookie "{'user':'admin'}" --secret 'fake_key_for_testing'
-```
- 
-`current_user()` trusts the signed session value without re-checking the DB lock state, so a forged cookie would reach `/admin` directly without touching `register()`/`login()` at all. This is deployment-dependent (only exploitable if the real `SECRET_KEY` env var is unset on the live host) and should be verified with `flask-unsign --unsign` against the actual target rather than assumed — the Unicode case-fold bug is the intended, code-guaranteed path regardless of deployment config.
